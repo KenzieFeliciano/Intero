@@ -44,6 +44,43 @@ the 2.5 kHz top of the swallow band.
 > humidity/temp sensor are from a different (environmental) project and have no
 > role in swallow sensing.
 
+## Sensor & enclosure notes
+
+**Three complementary signals.** A swallow can be sensed three ways, and the
+XIAO Sense gives you two of them for free:
+
+| Signal | Sensor | Strength | Weakness |
+| --- | --- | --- | --- |
+| Airborne sound | XIAO PDM mic (built in) | Easy, no extra parts | Also hears ambient room noise |
+| Skin vibration | Piezo contact disc (add-on) | Ignores room noise, strong swallow signal | Needs firm skin contact |
+| Motion | XIAO IMU (built in) | Rejects movement artifacts (head turns, walking) | Not a swallow signal on its own |
+
+Start with **just the built-in mic** to validate the pipeline, then add the piezo
+as a contact upgrade. Fusing mic + piezo + IMU is the path to robust detection.
+
+**Piezo contact disc.**
+- **Size:** a **20 mm** brass piezo disc is a good start (15 mm for a smaller
+  pendant, 27 mm for more sensitivity). It's only ~0.5 mm thick, so it lies flat
+  against the back (skin-side) wall of the enclosure.
+- **Lead wires:** the long red/black leads in product photos are just default
+  wire — **trim them to ~3–5 cm** and route internally. Wire length is not part
+  of the design.
+- **Preamp caveat:** a bare piezo is analog and high-impedance, so a clean signal
+  wants a tiny buffer (a single JFET or op-amp) between the disc and the XIAO's
+  analog input. "Just the sensor" gets you the disc; the small preamp helps.
+- **Why not a bare MEMS chip?** A raw MEMS mic is a sub-4 mm part with pads only
+  on its underside — it needs a custom PCB and reflow soldering, not hand wiring.
+  The piezo disc solders by hand with a basic iron.
+
+**Enclosure.** The disc, the XIAO, and the battery all sit *inside* the pendant;
+the piezo presses against the skin-side wall and only short internal wires
+connect them. Nothing protrudes — the chain is the only visible part.
+
+**Necklace length tradeoff.** A pendant naturally sits low (sternal notch) where
+swallow vibration is weaker. The signal is strongest higher on the throat — i.e.
+a **choker** length. Prototype both: there's a real tension between "sits like a
+normal pendant" and "best signal."
+
 ## Toolchain
 
 1. Install the **Arduino IDE**.
