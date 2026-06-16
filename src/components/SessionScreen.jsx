@@ -83,6 +83,7 @@ export default function SessionScreen() {
     startSession,
     stopSession,
     paceZone,
+    toggleDebug,
   } = useSessionStore();
 
   const isActive =
@@ -94,7 +95,14 @@ export default function SessionScreen() {
 
   return (
     <div className="flex min-h-full flex-col items-center justify-between px-6 py-10 max-w-md mx-auto">
-      <header className="text-center">
+      <header className="text-center relative w-full">
+        <button
+          onClick={toggleDebug}
+          aria-label="Toggle debug overlay"
+          className="absolute right-0 top-0 rounded-lg bg-slate-800/60 px-2 py-1 text-xs text-slate-500 active:text-slate-300"
+        >
+          debug
+        </button>
         <h1 className="text-2xl font-bold tracking-tight">Intero</h1>
         <p className="text-sm text-slate-400 mt-1">
           {isCalibrating

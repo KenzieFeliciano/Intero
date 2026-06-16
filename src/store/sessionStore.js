@@ -29,6 +29,13 @@ function computeRate(swallows, startedAt, now) {
   return (inWindow / windowSec) * 60;
 }
 
+const MAX_DEBUG_EVENTS = 14;
+
+/** Prepend an event to the capped debug log (newest first). */
+function pushEvent(list, event) {
+  return [event, ...list].slice(0, MAX_DEBUG_EVENTS);
+}
+
 export const useSessionStore = create((set, get) => ({
   // --- status ---
   engineState: EngineState.IDLE,
@@ -50,6 +57,13 @@ export const useSessionStore = create((set, get) => ({
   // --- post-meal flow ---
   showCheckIn: false,
   lastSessionId: null,
+
+  // --- debug / tuning ---
+  showDebug: false,
+  debugEvents: [], // recent accepted + rejected candidates (newest first)
+  peakLevel: 0, // running peak RMS, for scaling the meter
+
+  toggleDebug: () => set((s) => ({ showDebug: !s.showDebug })),
 
   setPaceThreshold: (n) => set({ paceThreshold: n }),
 
@@ -77,9 +91,11 @@ export const useSessionStore = create((set, get) => ({
       swallowTimes: [],
       swallowCount: 0,
       rate: 0,
+      peakLevel: 0,
       overpaceEvents: 0,
       calibration: null,
       showCheckIn: false,
+      debugEvents: [],
     });
 
     engine = new AudioEngine(
@@ -87,10 +103,13 @@ export const useSessionStore = create((set, get) => ({
         onState: (s) => set({ engineState: s }),
         onError: (err) => set({ error: err, engineState: EngineState.ERROR }),
         onCalibrated: (msg) => set({ calibration: msg }),
-        onLevel: (msg) => set({ level: msg.rms }),
+        onLevel: (msg) =>
+          set((s) => ({
+            level: msg.rms,
+            peakLevel: Math.max(s.peakLevel * 0.995, msg.rms), // slow decay
+          })),
         onSwallow: (msg) => get()._onSwallow(msg),
-        onRejected: (msg) =>
-          console.debug('[intero] rejected candidate', msg.reason, Math.round(msg.duration), 'ms'),
+        onRejected: (msg) => get()._onRejected(msg),
       },
       {
         // processorOptions forwarded into the worklet
@@ -127,7 +146,25 @@ export const useSessionStore = create((set, get) => ({
       swallowCount: state.swallowCount + 1,
       rate,
       overpaceEvents,
+      debugEvents: pushEvent(state.debugEvents, {
+        kind: 'swallow',
+        t: now,
+        duration: msg.duration,
+        snr: msg.snr,
+      }),
     });
+  },
+
+  _onRejected: (msg) => {
+    console.debug('[intero] rejected candidate', msg.reason, Math.round(msg.duration), 'ms');
+    set((s) => ({
+      debugEvents: pushEvent(s.debugEvents, {
+        kind: 'rejected',
+        t: Date.now(),
+        duration: msg.duration,
+        reason: msg.reason,
+      }),
+    }));
   },
 
   _tick: () => {
