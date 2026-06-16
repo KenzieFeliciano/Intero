@@ -71,6 +71,35 @@ function Stat({ label, value }) {
   );
 }
 
+/** Heart-rate connect button / live BPM chip. Only mounts where Web Bluetooth
+ *  exists (i.e. not on iOS). */
+function HeartRateChip({ connected, bpm, deviceName, error, onConnect, onDisconnect }) {
+  if (!connected) {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <button
+          onClick={onConnect}
+          className="flex items-center gap-2 rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-300 active:bg-slate-800"
+        >
+          <span className="text-pace-over">♥</span> Connect heart rate
+        </button>
+        {error && <span className="text-xs text-pace-over">{error}</span>}
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={onDisconnect}
+      className="flex items-center gap-2 rounded-full bg-slate-800 px-4 py-2 text-sm"
+      title={`${deviceName || 'Sensor'} — tap to disconnect`}
+    >
+      <span className="text-pace-over animate-pulse text-lg leading-none">♥</span>
+      <span className="font-semibold tabular-nums text-slate-100">{bpm ?? '—'}</span>
+      <span className="text-slate-500">bpm</span>
+    </button>
+  );
+}
+
 export default function SessionScreen() {
   const {
     engineState,
@@ -85,6 +114,13 @@ export default function SessionScreen() {
     paceZone,
     effectiveTarget,
     toggleDebug,
+    hrSupported,
+    hrConnected,
+    heartRate,
+    hrDeviceName,
+    hrError,
+    connectHeartRate,
+    disconnectHeartRate,
   } = useSessionStore();
 
   const target = effectiveTarget();
@@ -127,6 +163,17 @@ export default function SessionScreen() {
             value={baselineRate == null ? `≤${Math.round(target)}` : `≤${target.toFixed(1)}`}
           />
         </div>
+
+        {hrSupported && (
+          <HeartRateChip
+            connected={hrConnected}
+            bpm={heartRate}
+            deviceName={hrDeviceName}
+            error={hrError}
+            onConnect={connectHeartRate}
+            onDisconnect={disconnectHeartRate}
+          />
+        )}
 
         {isCalibrating && (
           <p className="text-sm text-pace-warn animate-pulse">

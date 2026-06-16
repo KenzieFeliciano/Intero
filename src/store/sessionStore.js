@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { AudioEngine, EngineState } from '../audio/AudioEngine.js';
 import { overpaceFeedback, primeHaptics } from '../audio/haptics.js';
+import { HeartRateMonitor } from '../sensors/heartRate.js';
 import { saveSession, saveCheckIn } from '../db/db.js';
 
 const ROLLING_WINDOW_MS = 60_000; // swallows/min computed over the last 60 s
@@ -18,6 +19,7 @@ const TICK_MS = 250; // UI refresh cadence
 
 let engine = null;
 let ticker = null;
+let hrMonitor = null;
 
 /** Rolling rate in swallows/minute. Normalizes by elapsed time early on so a
  *  single swallow at second 5 doesn't read as a wild extrapolation. */
@@ -99,6 +101,16 @@ export const useSessionStore = create((set, get) => ({
   // --- detection tuning (forwarded live to the worklet) ---
   detectionParams: { ...DEFAULT_DETECTION_PARAMS },
 
+  // --- optional heart-rate sensor (Web Bluetooth; unsupported on iOS) ---
+  hrSupported: HeartRateMonitor.supported,
+  hrConnected: false,
+  hrDeviceName: null,
+  hrError: null,
+  heartRate: null, // latest bpm
+  hrContact: null, // sensor-contact boolean, or null if unsupported
+  hrSum: 0, // for session-average bpm
+  hrCount: 0,
+
   // --- post-meal flow ---
   showCheckIn: false,
   lastSessionId: null,
@@ -118,6 +130,39 @@ export const useSessionStore = create((set, get) => ({
     const detectionParams = { ...get().detectionParams, [key]: value };
     set({ detectionParams });
     engine?.setParams({ [key]: value });
+  },
+
+  /** Connect a BLE heart-rate sensor. Must run in a user gesture. */
+  connectHeartRate: async () => {
+    if (!HeartRateMonitor.supported || hrMonitor) return;
+    set({ hrError: null });
+    hrMonitor = new HeartRateMonitor({
+      onMeasurement: (m) =>
+        set((s) => ({
+          heartRate: m.bpm,
+          hrContact: m.contact,
+          hrSum: s.hrSum + m.bpm,
+          hrCount: s.hrCount + 1,
+        })),
+      onConnection: (connected, name) =>
+        set((s) => ({
+          hrConnected: connected,
+          hrDeviceName: connected ? name : s.hrDeviceName,
+          heartRate: connected ? s.heartRate : null,
+          hrContact: connected ? s.hrContact : null,
+        })),
+      onError: (err) => set({ hrError: err.message }),
+    });
+    const ok = await hrMonitor.connect();
+    if (!ok && !get().hrConnected) hrMonitor = null;
+  },
+
+  disconnectHeartRate: async () => {
+    if (hrMonitor) {
+      await hrMonitor.disconnect();
+      hrMonitor = null;
+    }
+    set({ hrConnected: false, heartRate: null, hrContact: null });
   },
 
   /** Current personalized overpace target (swallows/min). */
@@ -161,6 +206,8 @@ export const useSessionStore = create((set, get) => ({
       calibration: null,
       showCheckIn: false,
       debugEvents: [],
+      hrSum: 0, // reset per-session HR average (keep any live connection)
+      hrCount: 0,
     });
 
     engine = new AudioEngine(
@@ -283,6 +330,7 @@ export const useSessionStore = create((set, get) => ({
           baselineRate: state.baselineRate,
           paceCeiling: state.paceCeiling,
           baseline: state.calibration?.baseline ?? null,
+          hrAvg: state.hrCount > 0 ? Math.round(state.hrSum / state.hrCount) : null,
         });
       } catch (e) {
         console.error('[intero] failed to save session', e);
