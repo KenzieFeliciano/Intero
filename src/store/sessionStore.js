@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { AudioEngine, EngineState } from '../audio/AudioEngine.js';
 import { overpaceFeedback, primeHaptics } from '../audio/haptics.js';
+import { NecklaceLink, NECKLACE_SAMPLE_RATE } from '../audio/necklaceLink.js';
 import { saveSession, saveCheckIn } from '../db/db.js';
 import {
   loadParams,
@@ -23,8 +24,13 @@ import {
 const ROLLING_WINDOW_MS = 60_000; // swallows/min computed over the last 60 s
 const TICK_MS = 250; // UI refresh cadence
 
+// Vite resolves the BLE-source worklet to its served/emitted asset URL.
+const bleSourceUrl = new URL('../audio/ble-source-processor.js', import.meta.url);
+
 let engine = null;
 let ticker = null;
+let necklace = null; // active NecklaceLink, when sourced from the necklace
+let bleSourceNode = null; // the BLE-source AudioWorkletNode receiving samples
 
 /** Rolling rate in swallows/minute. Normalizes by elapsed time early on so a
  *  single swallow at second 5 doesn't read as a wild extrapolation. */
@@ -105,6 +111,13 @@ export const useSessionStore = create((set, get) => ({
 
   // --- detection tuning (forwarded live to the worklet; persisted) ---
   detectionParams: loadParams(DEFAULT_DETECTION_PARAMS),
+
+  // --- signal source (mic vs. BLE necklace prototype) ---
+  source: 'mic',
+  necklaceSupported: NecklaceLink.supported,
+  necklaceConnected: false,
+  necklaceName: null,
+  necklaceError: null,
 
   // --- chewing / swallow classification ---
   chewing: false, // currently chewing (mastication detected)
@@ -215,13 +228,30 @@ export const useSessionStore = create((set, get) => ({
     return 'good';
   },
 
-  /** Start a session. Must be called from a user gesture (START tap). */
-  startSession: async () => {
-    if (engine) return;
+  /** Detection-event handlers shared by the mic and necklace sources. */
+  _engineHandlers: () => ({
+    onState: (s) => set({ engineState: s }),
+    onError: (err) => set({ error: err, engineState: EngineState.ERROR }),
+    onCalibrated: (msg) => set({ calibration: msg }),
+    onLevel: (msg) =>
+      set((s) => ({
+        level: msg.rms,
+        peakLevel: Math.max(s.peakLevel * 0.995, msg.rms), // slow decay
+        // Adaptive baseline/threshold drift over the session — keep the meter
+        // markers in sync with the worklet's current values.
+        calibration: s.calibration
+          ? { ...s.calibration, baseline: msg.baseline, threshold: msg.threshold }
+          : s.calibration,
+      })),
+    onSwallow: (msg) => get()._onSwallow(msg),
+    onRejected: (msg) => get()._onRejected(msg),
+    onChewing: (msg) => set({ chewing: msg.active }),
+    onRecording: (msg) =>
+      set({ recording: { samples: msg.samples, sampleRate: msg.sampleRate } }),
+  }),
 
-    // Prime the iOS fallback tone generator while we still hold the gesture.
-    primeHaptics();
-
+  /** Reset all per-session metrics. */
+  _resetSession: () =>
     set({
       error: null,
       startedAt: Date.now(),
@@ -241,38 +271,67 @@ export const useSessionStore = create((set, get) => ({
       isRecording: false,
       recording: null,
       replayResult: null,
+    }),
+
+  /** Start a mic session. Must be called from a user gesture (START tap). */
+  startSession: async () => {
+    if (engine) return;
+
+    // Prime the iOS fallback tone generator while we still hold the gesture.
+    primeHaptics();
+    get()._resetSession();
+    set({ source: 'mic' });
+
+    engine = new AudioEngine(get()._engineHandlers(), {
+      ...get().detectionParams,
+      calibrationMs: 3000,
     });
 
+    await engine.start();
+    ticker = setInterval(() => get()._tick(), TICK_MS);
+  },
+
+  /** Start a session sourced from the BLE necklace (prototype; non-iOS).
+   *  Reuses the entire detection graph — only the signal source differs. */
+  connectNecklace: async () => {
+    if (engine || !NecklaceLink.supported) return;
+    get()._resetSession();
+    set({ source: 'necklace', necklaceError: null });
+
+    necklace = new NecklaceLink({
+      onSamples: (samples) =>
+        bleSourceNode?.port.postMessage({ type: 'samples', data: samples }, [samples.buffer]),
+      onConnection: (connected, name) =>
+        set({ necklaceConnected: connected, necklaceName: connected ? name : null }),
+      onError: (err) => set({ necklaceError: err.message }),
+    });
+
+    const ok = await necklace.connect();
+    if (!ok) {
+      necklace = null;
+      set({ source: 'mic', engineState: EngineState.IDLE });
+      return;
+    }
+
     engine = new AudioEngine(
+      get()._engineHandlers(),
+      { ...get().detectionParams, calibrationMs: 3000 },
       {
-        onState: (s) => set({ engineState: s }),
-        onError: (err) => set({ error: err, engineState: EngineState.ERROR }),
-        onCalibrated: (msg) => set({ calibration: msg }),
-        onLevel: (msg) =>
-          set((s) => ({
-            level: msg.rms,
-            peakLevel: Math.max(s.peakLevel * 0.995, msg.rms), // slow decay
-            // Adaptive baseline/threshold drift over the session — keep the
-            // meter markers in sync with the worklet's current values.
-            calibration: s.calibration
-              ? { ...s.calibration, baseline: msg.baseline, threshold: msg.threshold }
-              : s.calibration,
-          })),
-        onSwallow: (msg) => get()._onSwallow(msg),
-        onRejected: (msg) => get()._onRejected(msg),
-        onChewing: (msg) => set({ chewing: msg.active }),
-        onRecording: (msg) =>
-          set({ recording: { samples: msg.samples, sampleRate: msg.sampleRate } }),
-      },
-      {
-        // processorOptions forwarded into the worklet
-        ...get().detectionParams,
-        calibrationMs: 3000,
+        sampleRate: NECKLACE_SAMPLE_RATE,
+        sourceFactory: async (ctx) => {
+          await ctx.audioWorklet.addModule(bleSourceUrl);
+          bleSourceNode = new AudioWorkletNode(ctx, 'ble-source-processor', {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            processorOptions: { bufferSeconds: 4 },
+          });
+          return bleSourceNode;
+        },
       }
     );
 
     await engine.start();
-
     ticker = setInterval(() => get()._tick(), TICK_MS);
   },
 
@@ -388,11 +447,20 @@ export const useSessionStore = create((set, get) => ({
       engine = null;
     }
 
+    if (necklace) {
+      await necklace.disconnect();
+      necklace = null;
+    }
+    bleSourceNode = null;
+
     set({
       engineState: EngineState.IDLE,
       elapsedMs: durationMs,
       lastSessionId,
       showCheckIn: state.swallowCount > 0 || durationMs > 0,
+      source: 'mic',
+      necklaceConnected: false,
+      necklaceName: null,
     });
   },
 

@@ -40,10 +40,18 @@ export class AudioEngine {
    * @param {(s:string)=>void} [handlers.onState]      engine state change
    * @param {(err:object)=>void} [handlers.onError]    fatal/permission errors
    * @param {object} [options] processorOptions forwarded to the worklet
+   * @param {object} [engineOpts]
+   * @param {(ctx:AudioContext)=>Promise<AudioNode>} [engineOpts.sourceFactory]
+   *   Optional alternate signal source (e.g. a BLE necklace feed). When given,
+   *   the mic / getUserMedia path is skipped and this node feeds the band-pass.
+   * @param {number} [engineOpts.sampleRate] AudioContext sample rate to request
+   *   (used by the BLE path so the graph runs at the necklace's stream rate).
    */
-  constructor(handlers = {}, options = {}) {
+  constructor(handlers = {}, options = {}, engineOpts = {}) {
     this.handlers = handlers;
     this.options = options;
+    this.sourceFactory = engineOpts.sourceFactory || null;
+    this.sampleRate = engineOpts.sampleRate || null;
 
     this.ctx = null;
     this.stream = null;
@@ -75,33 +83,39 @@ export class AudioEngine {
       return;
     }
 
-    // --- 1. Permission / capture ---
-    if (!navigator.mediaDevices?.getUserMedia) {
-      this._emitError('unsupported', 'This browser does not support microphone capture.');
-      return;
-    }
+    const useMic = !this.sourceFactory;
 
-    this._setState(EngineState.REQUESTING);
-    try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          // Disable browser cleanup so our DSP sees the raw signal.
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1,
-        },
-        video: false,
-      });
-    } catch (err) {
-      this._handleGumError(err);
-      return;
+    // --- 1. Permission / capture (mic path only) ---
+    if (useMic) {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        this._emitError('unsupported', 'This browser does not support microphone capture.');
+        return;
+      }
+
+      this._setState(EngineState.REQUESTING);
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            // Disable browser cleanup so our DSP sees the raw signal.
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 1,
+          },
+          video: false,
+        });
+      } catch (err) {
+        this._handleGumError(err);
+        return;
+      }
+    } else {
+      this._setState(EngineState.REQUESTING);
     }
 
     // --- 2. AudioContext (created inside the gesture-driven call) ---
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new Ctx();
+      this.ctx = this.sampleRate ? new Ctx({ sampleRate: this.sampleRate }) : new Ctx();
       // iOS may hand back a suspended context even from a gesture.
       if (this.ctx.state === 'suspended') {
         await this.ctx.resume();
@@ -116,7 +130,9 @@ export class AudioEngine {
 
     // --- 3. Build the graph ---
     try {
-      this.source = this.ctx.createMediaStreamSource(this.stream);
+      this.source = useMic
+        ? this.ctx.createMediaStreamSource(this.stream)
+        : await this.sourceFactory(this.ctx);
 
       this.highpass = this.ctx.createBiquadFilter();
       this.highpass.type = 'highpass';

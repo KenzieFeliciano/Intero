@@ -90,6 +90,12 @@ export default function DebugOverlay() {
     chewing,
     foodSwallows,
     liquidSwallows,
+    source,
+    necklaceSupported,
+    necklaceConnected,
+    necklaceName,
+    necklaceError,
+    connectNecklace,
     isRecording,
     recording,
     replayResult,
@@ -147,6 +153,26 @@ export default function DebugOverlay() {
         <span className="text-pace-good">food {foodSwallows}</span>
         <span className="text-sky-300">liquid {liquidSwallows}</span>
       </div>
+
+      {/* Necklace source (prototype; Web Bluetooth, non-iOS) */}
+      {necklaceSupported && (
+        <div className="mt-2 flex items-center gap-2 border-t border-slate-800 pt-2">
+          <span className="text-[10px] text-slate-500">source:</span>
+          {source === 'necklace' && necklaceConnected ? (
+            <span className="text-[11px] text-pace-good">
+              ⬡ {necklaceName || 'necklace'} connected
+            </span>
+          ) : (
+            <button
+              onClick={connectNecklace}
+              className="rounded bg-slate-700 px-2 py-1 text-[11px] text-slate-200 active:bg-slate-600"
+            >
+              ⬡ Connect necklace
+            </button>
+          )}
+          {necklaceError && <span className="text-[10px] text-pace-over">{necklaceError}</span>}
+        </div>
+      )}
 
       <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5">
         {SLIDERS.map(([key, label, min, max, step]) => (
