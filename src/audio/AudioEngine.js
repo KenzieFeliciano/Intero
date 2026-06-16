@@ -219,6 +219,11 @@ export class AudioEngine {
     }
   }
 
+  /** Live-update detection parameters in the worklet (no restart). */
+  setParams(params) {
+    this.workletNode?.port.postMessage({ type: 'setParams', params });
+  }
+
   _teardownStream() {
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop());

@@ -79,12 +79,15 @@ export default function SessionScreen() {
     swallowCount,
     elapsedMs,
     calibration,
-    paceThreshold,
+    baselineRate,
     startSession,
     stopSession,
     paceZone,
+    effectiveTarget,
     toggleDebug,
   } = useSessionStore();
+
+  const target = effectiveTarget();
 
   const isActive =
     engineState === EngineState.RUNNING ||
@@ -119,7 +122,10 @@ export default function SessionScreen() {
         <div className="grid grid-cols-3 gap-6 w-full">
           <Stat label="Swallows" value={swallowCount} />
           <Stat label="Time" value={formatElapsed(elapsedMs)} />
-          <Stat label="Target" value={`≤${paceThreshold}`} />
+          <Stat
+            label={baselineRate == null ? 'Cap' : 'Your pace'}
+            value={baselineRate == null ? `≤${Math.round(target)}` : `≤${target.toFixed(1)}`}
+          />
         </div>
 
         {isCalibrating && (

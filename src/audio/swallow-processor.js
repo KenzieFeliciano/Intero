@@ -45,6 +45,18 @@ class SwallowProcessor extends AudioWorkletProcessor {
     this.maxEventMs = opts.maxEventMs ?? 1500;
     // A floor so a dead-silent room doesn't produce a near-zero threshold.
     this.minBaseline = opts.minBaseline ?? 1e-4;
+    // EMA smoothing of the RMS stream (0–1). Light smoothing knocks down
+    // single-window jitter without flattening the swallow's peak. 1 = off.
+    this.emaAlpha = opts.emaAlpha ?? 0.6;
+    // Adaptive noise floor: how fast the baseline tracks ambient drift during
+    // quiet windows (per 50 ms window). 0 = frozen at initial calibration.
+    this.adaptRate = opts.adaptRate ?? 0.02;
+    // Reject candidates whose peak doesn't clear the baseline by this factor,
+    // independent of the absolute threshold. Guards against loud-but-flat rooms.
+    this.minSnr = opts.minSnr ?? 2.0;
+
+    // Smoothed RMS used by the detector.
+    this.smoothed = 0;
 
     // --- Windowing state ---
     this.windowSamples = Math.max(1, Math.round((sampleRate * this.windowMs) / 1000));
@@ -76,11 +88,28 @@ class SwallowProcessor extends AudioWorkletProcessor {
       const msg = e.data || {};
       if (msg.type === 'recalibrate') {
         this._resetCalibration();
-      } else if (msg.type === 'setThreshold' && typeof msg.value === 'number') {
-        this.thresholdMultiplier = msg.value;
-        if (!this.calibrating) this._applyThreshold();
+      } else if (msg.type === 'setParams' && msg.params) {
+        this._setParams(msg.params);
       }
     };
+  }
+
+  /** Live-update tunable parameters from the UI (no restart needed). */
+  _setParams(p) {
+    const tunable = [
+      'thresholdMultiplier',
+      'minDuration',
+      'maxDuration',
+      'minInterval',
+      'releaseRatio',
+      'emaAlpha',
+      'adaptRate',
+      'minSnr',
+    ];
+    for (const k of tunable) {
+      if (typeof p[k] === 'number' && Number.isFinite(p[k])) this[k] = p[k];
+    }
+    if (!this.calibrating) this._applyThreshold();
   }
 
   _resetCalibration() {
@@ -90,6 +119,7 @@ class SwallowProcessor extends AudioWorkletProcessor {
     this.threshold = Infinity;
     this.releaseThreshold = Infinity;
     this.state = STATE.SILENT;
+    this.smoothed = 0;
   }
 
   _applyThreshold() {
@@ -106,6 +136,7 @@ class SwallowProcessor extends AudioWorkletProcessor {
       sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 
     this.baseline = Math.max(median, this.minBaseline);
+    this.smoothed = this.baseline; // seed the EMA so detection starts settled
     this.calibrating = false;
     this._applyThreshold();
 
@@ -121,20 +152,41 @@ class SwallowProcessor extends AudioWorkletProcessor {
    * Fed one RMS value per ~50 ms window. Drives the state machine and emits
    * swallow events.
    */
-  _onWindow(rms) {
+  _onWindow(rawRms) {
     this.elapsedMs += this.windowMs;
     const now = this.elapsedMs;
 
+    // Exponential moving average to suppress single-window jitter.
+    this.smoothed = this.emaAlpha * rawRms + (1 - this.emaAlpha) * this.smoothed;
+    const rms = this.smoothed;
+
     if (this.calibrating) {
-      this.calSamples.push(rms);
+      this.calSamples.push(rawRms);
       if (this.calSamples.length >= this.calWindowsNeeded) {
         this._finishCalibration();
       }
       return;
     }
 
-    // Stream the live level out for visualization / debugging.
-    this.port.postMessage({ type: 'level', rms, t: now, state: this.state });
+    // Adaptive noise floor: while genuinely quiet, let the baseline drift
+    // toward the ambient level so the threshold follows a changing room (an AC
+    // kicking on, a noisier restaurant) instead of staying frozen at startup.
+    if (this.state === STATE.SILENT && rms < this.threshold) {
+      this.baseline = (1 - this.adaptRate) * this.baseline + this.adaptRate * rms;
+      this.baseline = Math.max(this.baseline, this.minBaseline);
+      this._applyThreshold();
+    }
+
+    // Stream both raw and smoothed levels out for visualization / debugging.
+    this.port.postMessage({
+      type: 'level',
+      rms,
+      raw: rawRms,
+      threshold: this.threshold,
+      baseline: this.baseline,
+      t: now,
+      state: this.state,
+    });
 
     switch (this.state) {
       case STATE.SILENT: {
@@ -203,11 +255,13 @@ class SwallowProcessor extends AudioWorkletProcessor {
   _evaluateEvent(offsetTime) {
     const duration = offsetTime - this.onsetTime;
     const sinceLast = offsetTime - this.lastEventTime;
+    const snr = this.peakRms / this.baseline;
 
     const durationOk = duration >= this.minDuration && duration <= this.maxDuration;
     const intervalOk = sinceLast >= this.minInterval;
+    const snrOk = snr >= this.minSnr;
 
-    if (durationOk && intervalOk) {
+    if (durationOk && intervalOk && snrOk) {
       this.lastEventTime = offsetTime;
       this.port.postMessage({
         type: 'swallow',
@@ -215,16 +269,12 @@ class SwallowProcessor extends AudioWorkletProcessor {
         duration,
         peak: this.peakRms,
         baseline: this.baseline,
-        snr: this.peakRms / this.baseline,
+        snr,
       });
     } else {
       // Surface rejected candidates — useful while tuning thresholds.
-      this.port.postMessage({
-        type: 'rejected',
-        t: offsetTime,
-        duration,
-        reason: !durationOk ? 'duration' : 'interval',
-      });
+      const reason = !durationOk ? 'duration' : !snrOk ? 'snr' : 'interval';
+      this.port.postMessage({ type: 'rejected', t: offsetTime, duration, snr, reason });
     }
   }
 

@@ -1,5 +1,35 @@
 import { useSessionStore } from '../store/sessionStore.js';
 
+// Live-tunable detection params: [key, label, min, max, step].
+const SLIDERS = [
+  ['thresholdMultiplier', 'Threshold ×base', 1.5, 8, 0.1],
+  ['minSnr', 'Min SNR', 1, 6, 0.1],
+  ['minDuration', 'Min dur (ms)', 50, 500, 10],
+  ['maxDuration', 'Max dur (ms)', 400, 1500, 10],
+  ['minInterval', 'Min gap (ms)', 500, 4000, 100],
+  ['emaAlpha', 'Smoothing α', 0.2, 1, 0.05],
+];
+
+function ParamSlider({ keyName, label, min, max, step, value, onChange }) {
+  return (
+    <label className="block">
+      <div className="flex justify-between text-[10px] text-slate-400">
+        <span>{label}</span>
+        <span className="tabular-nums text-slate-200">{value}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(keyName, parseFloat(e.target.value))}
+        className="h-1 w-full accent-sky-400"
+      />
+    </label>
+  );
+}
+
 /** A live RMS meter with the calibrated baseline + threshold marked, so you can
  *  see how each swallow's energy compares to the firing threshold. */
 function LevelMeter({ level, peak, baseline, threshold }) {
@@ -49,6 +79,10 @@ export default function DebugOverlay() {
     debugEvents,
     swallowCount,
     rate,
+    baselineRate,
+    effectiveTarget,
+    detectionParams,
+    setDetectionParam,
     recalibrate,
     toggleDebug,
   } = useSessionStore();
@@ -83,7 +117,25 @@ export default function DebugOverlay() {
       <div className="mt-2 flex justify-between text-slate-400">
         <span>count {swallowCount}</span>
         <span>rate {rate.toFixed(1)}/min</span>
-        <span>peak {peakLevel.toExponential(1)}</span>
+        <span>
+          base {baselineRate == null ? '—' : baselineRate.toFixed(1)} → tgt{' '}
+          {effectiveTarget().toFixed(1)}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5">
+        {SLIDERS.map(([key, label, min, max, step]) => (
+          <ParamSlider
+            key={key}
+            keyName={key}
+            label={label}
+            min={min}
+            max={max}
+            step={step}
+            value={detectionParams[key]}
+            onChange={setDetectionParam}
+          />
+        ))}
       </div>
 
       <div className="mt-2 max-h-32 overflow-y-auto">

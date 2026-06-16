@@ -23,7 +23,8 @@ export async function saveSession(session) {
     durationMs: session.durationMs,
     swallowCount: session.swallowCount,
     overpaceEvents: session.overpaceEvents ?? 0,
-    paceThreshold: session.paceThreshold,
+    baselineRate: session.baselineRate ?? null,
+    paceCeiling: session.paceCeiling ?? null,
     baseline: session.baseline ?? null,
   });
 }
