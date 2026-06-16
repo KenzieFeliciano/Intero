@@ -122,7 +122,13 @@ export const useSessionStore = create((set, get) => ({
   // --- chewing / swallow classification ---
   chewing: false, // currently chewing (mastication detected)
   foodSwallows: 0, // swallows preceded by chewing
-  liquidSwallows: 0, // swallows without recent chewing (water/saliva)
+  liquidSwallows: 0, // higher-energy swallows, no recent chew (water)
+  salivaSwallows: 0, // low-energy idle swallows (excluded from pace)
+  countSaliva: false, // include saliva swallows in the pace/count?
+  salivaSnrMax: 3.0, // no-chew swallows below this SNR are treated as saliva
+
+  setCountSaliva: (v) => set({ countSaliva: v }),
+  setSalivaSnrMax: (n) => set({ salivaSnrMax: n }),
 
   // --- recording / replay (debug tuning loop) ---
   isRecording: false,
@@ -268,6 +274,7 @@ export const useSessionStore = create((set, get) => ({
       chewing: false,
       foodSwallows: 0,
       liquidSwallows: 0,
+      salivaSwallows: 0,
       isRecording: false,
       recording: null,
       replayResult: null,
@@ -338,17 +345,46 @@ export const useSessionStore = create((set, get) => ({
   _onSwallow: (msg) => {
     const now = Date.now();
     const state = get();
-    const times = [...state.swallowTimes, now];
-    const rate = computeRate(times, state.startedAt, now);
 
-    const cls = msg.kind === 'food' ? 'food' : 'liquid'; // chew-context heuristic
+    // Classify: chewing just before → food; otherwise a low-energy swallow with
+    // no chew context is most likely idle saliva, a higher-energy one is water.
+    let cls;
+    if (msg.chewRecent) cls = 'food';
+    else if (msg.snr < state.salivaSnrMax) cls = 'saliva';
+    else cls = 'liquid';
+
+    // Saliva swallows don't count toward pace unless explicitly included.
+    const isIngestion = cls !== 'saliva' || state.countSaliva;
 
     // eslint-disable-next-line no-console
     console.log(
-      `[intero] 🫗 swallow #${state.swallowCount + 1} [${cls}] — dur ${Math.round(msg.duration)}ms, ` +
-        `SNR ${msg.snr.toFixed(1)}, rate ${rate.toFixed(1)}/min`
+      `[intero] 🫗 swallow [${cls}]${isIngestion ? '' : ' (ignored)'} — ` +
+        `dur ${Math.round(msg.duration)}ms, SNR ${msg.snr.toFixed(1)}`
     );
 
+    // Per-class counters and the debug log update regardless of ingestion.
+    const counters = {
+      foodSwallows: state.foodSwallows + (cls === 'food' ? 1 : 0),
+      liquidSwallows: state.liquidSwallows + (cls === 'liquid' ? 1 : 0),
+      salivaSwallows: state.salivaSwallows + (cls === 'saliva' ? 1 : 0),
+    };
+    const debugEvents = pushEvent(state.debugEvents, {
+      kind: 'swallow',
+      cls,
+      ignored: !isIngestion,
+      t: now,
+      duration: msg.duration,
+      snr: msg.snr,
+    });
+
+    if (!isIngestion) {
+      set({ ...counters, debugEvents });
+      return;
+    }
+
+    // Ingestion swallow: drives count, rate, pacing, haptics.
+    const times = [...state.swallowTimes, now];
+    const rate = computeRate(times, state.startedAt, now);
     const swallowCount = state.swallowCount + 1;
     const target = effectiveTargetRate(
       state.baselineRate,
@@ -363,20 +399,13 @@ export const useSessionStore = create((set, get) => ({
     }
 
     set({
+      ...counters,
+      debugEvents,
       swallowTimes: times,
       swallowCount,
       rate,
       overpaceEvents,
-      foodSwallows: state.foodSwallows + (cls === 'food' ? 1 : 0),
-      liquidSwallows: state.liquidSwallows + (cls === 'liquid' ? 1 : 0),
       baselineRate: learnBaseline(state.baselineRate, rate, swallowCount, target),
-      debugEvents: pushEvent(state.debugEvents, {
-        kind: 'swallow',
-        cls,
-        t: now,
-        duration: msg.duration,
-        snr: msg.snr,
-      }),
     });
   },
 

@@ -90,6 +90,11 @@ export default function DebugOverlay() {
     chewing,
     foodSwallows,
     liquidSwallows,
+    salivaSwallows,
+    countSaliva,
+    salivaSnrMax,
+    setCountSaliva,
+    setSalivaSnrMax,
     source,
     necklaceSupported,
     necklaceConnected,
@@ -152,6 +157,34 @@ export default function DebugOverlay() {
         </span>
         <span className="text-pace-good">food {foodSwallows}</span>
         <span className="text-sky-300">liquid {liquidSwallows}</span>
+        <span className="text-slate-500">saliva {salivaSwallows}</span>
+      </div>
+
+      <div className="mt-1 flex items-center gap-3">
+        <label className="flex items-center gap-1 text-[10px] text-slate-400">
+          <input
+            type="checkbox"
+            checked={countSaliva}
+            onChange={(e) => setCountSaliva(e.target.checked)}
+            className="accent-sky-400"
+          />
+          count saliva in pace
+        </label>
+        <div className="flex-1">
+          <div className="flex justify-between text-[10px] text-slate-400">
+            <span>saliva &lt; SNR</span>
+            <span className="tabular-nums text-slate-200">{salivaSnrMax.toFixed(1)}</span>
+          </div>
+          <input
+            type="range"
+            min={1.5}
+            max={6}
+            step={0.1}
+            value={salivaSnrMax}
+            onChange={(e) => setSalivaSnrMax(parseFloat(e.target.value))}
+            className="h-1 w-full accent-slate-400"
+          />
+        </div>
       </div>
 
       {/* Necklace source (prototype; Web Bluetooth, non-iOS) */}
@@ -251,11 +284,17 @@ export default function DebugOverlay() {
             <div
               key={i}
               className={`flex justify-between border-b border-slate-800/60 py-0.5 ${
-                e.kind === 'swallow' ? 'text-pace-good' : 'text-slate-500'
+                e.kind !== 'swallow'
+                  ? 'text-slate-500'
+                  : e.ignored
+                    ? 'text-slate-600'
+                    : 'text-pace-good'
               }`}
             >
               <span>
-                {e.kind === 'swallow' ? `✓ swallow · ${e.cls}` : `✗ ${e.reason}`}
+                {e.kind === 'swallow'
+                  ? `${e.ignored ? '∅' : '✓'} ${e.cls}`
+                  : `✗ ${e.reason}`}
               </span>
               <span>{Math.round(e.duration)}ms</span>
               <span>{e.kind === 'swallow' ? `SNR ${e.snr.toFixed(1)}` : ''}</span>
