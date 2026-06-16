@@ -166,6 +166,9 @@ export class AudioEngine {
       case 'rejected':
         this.handlers.onRejected?.(msg);
         break;
+      case 'chewing':
+        this.handlers.onChewing?.(msg);
+        break;
       case 'recording':
         this.handlers.onRecording?.(msg);
         this._recordingResolve?.(msg);

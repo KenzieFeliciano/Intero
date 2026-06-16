@@ -8,6 +8,8 @@ const SLIDERS = [
   ['maxDuration', 'Max dur (ms)', 400, 1500, 10],
   ['minInterval', 'Min gap (ms)', 500, 4000, 100],
   ['emaAlpha', 'Smoothing α', 0.2, 1, 0.05],
+  ['chewThresholdMult', 'Chew ×base', 1.2, 5, 0.1],
+  ['minChewBumps', 'Chew bumps', 2, 10, 1],
 ];
 
 function ParamSlider({ keyName, label, min, max, step, value, onChange }) {
@@ -85,6 +87,9 @@ export default function DebugOverlay() {
     setDetectionParam,
     recalibrate,
     toggleDebug,
+    chewing,
+    foodSwallows,
+    liquidSwallows,
     isRecording,
     recording,
     replayResult,
@@ -92,6 +97,7 @@ export default function DebugOverlay() {
     stopRecording,
     downloadRecording,
     replayRecording,
+    importRecording,
   } = useSessionStore();
 
   const recSeconds = recording
@@ -134,6 +140,14 @@ export default function DebugOverlay() {
         </span>
       </div>
 
+      <div className="mt-1 flex justify-between text-slate-400">
+        <span className={chewing ? 'text-pace-warn' : 'text-slate-600'}>
+          {chewing ? '◉ chewing' : '○ not chewing'}
+        </span>
+        <span className="text-pace-good">food {foodSwallows}</span>
+        <span className="text-sky-300">liquid {liquidSwallows}</span>
+      </div>
+
       <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5">
         {SLIDERS.map(([key, label, min, max, step]) => (
           <ParamSlider
@@ -174,9 +188,26 @@ export default function DebugOverlay() {
           >
             ⤓ WAV
           </button>
-          <span className="ml-auto text-[10px] text-slate-500">
-            {isRecording ? 'recording…' : recording ? `${recSeconds}s clip` : 'no clip'}
-          </span>
+          <label className="cursor-pointer rounded bg-slate-700 px-2 py-1 text-[11px] text-slate-200">
+            ⤒ Import
+            <input
+              type="file"
+              accept="audio/*,.wav"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importRecording(f);
+                e.target.value = '';
+              }}
+            />
+          </label>
+        </div>
+        <div className="mt-1 text-[10px] text-slate-500">
+          {isRecording
+            ? 'recording…'
+            : recording
+              ? `${recSeconds}s clip${recording.imported ? ` · imported${recording.name ? ` (${recording.name})` : ''}` : ''}`
+              : 'no clip — record or import a WAV'}
         </div>
         {replayResult && (
           <p className="mt-1 text-[11px] text-sky-300">
@@ -197,7 +228,9 @@ export default function DebugOverlay() {
                 e.kind === 'swallow' ? 'text-pace-good' : 'text-slate-500'
               }`}
             >
-              <span>{e.kind === 'swallow' ? '✓ swallow' : `✗ ${e.reason}`}</span>
+              <span>
+                {e.kind === 'swallow' ? `✓ swallow · ${e.cls}` : `✗ ${e.reason}`}
+              </span>
               <span>{Math.round(e.duration)}ms</span>
               <span>{e.kind === 'swallow' ? `SNR ${e.snr.toFixed(1)}` : ''}</span>
             </div>

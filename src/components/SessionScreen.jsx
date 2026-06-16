@@ -86,6 +86,7 @@ export default function SessionScreen() {
     paceZone,
     effectiveTarget,
     toggleDebug,
+    chewing,
   } = useSessionStore();
 
   const target = effectiveTarget();
@@ -112,7 +113,9 @@ export default function SessionScreen() {
           {isCalibrating
             ? 'Listening to the room…'
             : engineState === EngineState.RUNNING
-              ? 'Eat slowly. Feel each bite.'
+              ? chewing
+                ? '🍴 Chewing — take your time'
+                : 'Eat slowly. Feel each bite.'
               : 'Retrain your fullness signal'}
         </p>
       </header>

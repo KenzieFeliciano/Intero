@@ -31,6 +31,32 @@ export function persistParams(params) {
   }
 }
 
+/**
+ * Decode an audio File (WAV, and whatever else the browser supports) into mono
+ * Float32 samples so it can be run through the replay harness — e.g. public
+ * chewing/swallow clips from Freesound, no recording required.
+ * @returns {Promise<{samples:Float32Array, sampleRate:number}>}
+ */
+export async function decodeAudioFile(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx();
+  try {
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    // Downmix to mono.
+    const ch = audioBuffer.numberOfChannels;
+    const len = audioBuffer.length;
+    const mono = new Float32Array(len);
+    for (let c = 0; c < ch; c++) {
+      const data = audioBuffer.getChannelData(c);
+      for (let i = 0; i < len; i++) mono[i] += data[i] / ch;
+    }
+    return { samples: mono, sampleRate: audioBuffer.sampleRate };
+  } finally {
+    ctx.close();
+  }
+}
+
 /** Encode mono Float32 PCM as a 16-bit WAV Blob. */
 export function encodeWav(samples, sampleRate) {
   const numSamples = samples.length;
@@ -77,7 +103,7 @@ export function encodeWav(samples, sampleRate) {
  *
  * @returns {Promise<{swallows:number, rejected:number, events:object[]}>}
  */
-export async function replayDetection(samples, sampleRate, params) {
+export async function replayDetection(samples, sampleRate, params, { prefilter = false } = {}) {
   const length = samples.length;
   const offline = new OfflineAudioContext(1, length, sampleRate);
   await offline.audioWorklet.addModule(workletUrl);
@@ -95,6 +121,23 @@ export async function replayDetection(samples, sampleRate, params) {
     processorOptions: { ...params, calibrationMs: 3000 },
   });
 
+  // Live captures are already band-passed (the worklet sits after the filters);
+  // imported clips are raw, so apply the same 300–2500 Hz band-pass first.
+  let head = source;
+  if (prefilter) {
+    const hp = offline.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 300;
+    hp.Q.value = 0.707;
+    const lp = offline.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 2500;
+    lp.Q.value = 0.707;
+    source.connect(hp);
+    hp.connect(lp);
+    head = lp;
+  }
+
   let swallows = 0;
   let rejected = 0;
   const events = [];
@@ -108,7 +151,7 @@ export async function replayDetection(samples, sampleRate, params) {
     }
   };
 
-  source.connect(node);
+  head.connect(node);
   node.connect(offline.destination);
   source.start();
 

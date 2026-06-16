@@ -12,7 +12,13 @@ import { create } from 'zustand';
 import { AudioEngine, EngineState } from '../audio/AudioEngine.js';
 import { overpaceFeedback, primeHaptics } from '../audio/haptics.js';
 import { saveSession, saveCheckIn } from '../db/db.js';
-import { loadParams, persistParams, encodeWav, replayDetection } from './tuning.js';
+import {
+  loadParams,
+  persistParams,
+  encodeWav,
+  decodeAudioFile,
+  replayDetection,
+} from './tuning.js';
 
 const ROLLING_WINDOW_MS = 60_000; // swallows/min computed over the last 60 s
 const TICK_MS = 250; // UI refresh cadence
@@ -100,6 +106,11 @@ export const useSessionStore = create((set, get) => ({
   // --- detection tuning (forwarded live to the worklet; persisted) ---
   detectionParams: loadParams(DEFAULT_DETECTION_PARAMS),
 
+  // --- chewing / swallow classification ---
+  chewing: false, // currently chewing (mastication detected)
+  foodSwallows: 0, // swallows preceded by chewing
+  liquidSwallows: 0, // swallows without recent chewing (water/saliva)
+
   // --- recording / replay (debug tuning loop) ---
   isRecording: false,
   recording: null, // { samples: Float32Array, sampleRate } of the last capture
@@ -161,8 +172,26 @@ export const useSessionStore = create((set, get) => ({
   replayRecording: async () => {
     const rec = get().recording;
     if (!rec) return;
-    const result = await replayDetection(rec.samples, rec.sampleRate, get().detectionParams);
+    const result = await replayDetection(rec.samples, rec.sampleRate, get().detectionParams, {
+      prefilter: !!rec.imported, // imported clips are raw; band-pass them first
+    });
     set({ replayResult: result });
+  },
+
+  /** Load an external audio file (e.g. a public Freesound clip) as the active
+   *  clip so it can be replayed/tuned against — no recording required. */
+  importRecording: async (file) => {
+    if (!file) return;
+    try {
+      const { samples, sampleRate } = await decodeAudioFile(file);
+      set({
+        recording: { samples, sampleRate, imported: true, name: file.name },
+        replayResult: null,
+      });
+    } catch (e) {
+      console.error('[intero] failed to decode audio file', e);
+      set({ error: { code: 'decode', message: 'Could not decode that audio file.' } });
+    }
   },
 
   /** Current personalized overpace target (swallows/min). */
@@ -206,6 +235,9 @@ export const useSessionStore = create((set, get) => ({
       calibration: null,
       showCheckIn: false,
       debugEvents: [],
+      chewing: false,
+      foodSwallows: 0,
+      liquidSwallows: 0,
       isRecording: false,
       recording: null,
       replayResult: null,
@@ -228,6 +260,7 @@ export const useSessionStore = create((set, get) => ({
           })),
         onSwallow: (msg) => get()._onSwallow(msg),
         onRejected: (msg) => get()._onRejected(msg),
+        onChewing: (msg) => set({ chewing: msg.active }),
         onRecording: (msg) =>
           set({ recording: { samples: msg.samples, sampleRate: msg.sampleRate } }),
       },
@@ -249,9 +282,11 @@ export const useSessionStore = create((set, get) => ({
     const times = [...state.swallowTimes, now];
     const rate = computeRate(times, state.startedAt, now);
 
+    const cls = msg.kind === 'food' ? 'food' : 'liquid'; // chew-context heuristic
+
     // eslint-disable-next-line no-console
     console.log(
-      `[intero] 🫗 swallow #${state.swallowCount + 1} — dur ${Math.round(msg.duration)}ms, ` +
+      `[intero] 🫗 swallow #${state.swallowCount + 1} [${cls}] — dur ${Math.round(msg.duration)}ms, ` +
         `SNR ${msg.snr.toFixed(1)}, rate ${rate.toFixed(1)}/min`
     );
 
@@ -273,9 +308,12 @@ export const useSessionStore = create((set, get) => ({
       swallowCount,
       rate,
       overpaceEvents,
+      foodSwallows: state.foodSwallows + (cls === 'food' ? 1 : 0),
+      liquidSwallows: state.liquidSwallows + (cls === 'liquid' ? 1 : 0),
       baselineRate: learnBaseline(state.baselineRate, rate, swallowCount, target),
       debugEvents: pushEvent(state.debugEvents, {
         kind: 'swallow',
+        cls,
         t: now,
         duration: msg.duration,
         snr: msg.snr,

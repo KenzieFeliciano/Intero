@@ -58,6 +58,23 @@ class SwallowProcessor extends AudioWorkletProcessor {
     // Smoothed RMS used by the detector.
     this.smoothed = 0;
 
+    // --- Chewing (mastication) detection -------------------------------
+    // Chewing is a SUSTAINED, RHYTHMIC train of mid-band energy bumps (jaw
+    // cycles ~1–2 Hz), unlike a swallow's single transient. We count energy
+    // "bumps" above a lower chew threshold within a trailing window; enough of
+    // them, spread over time, means the user is actively chewing — which in
+    // turn lets us tag the following swallow as food (vs. water/saliva).
+    this.chewThresholdMult = opts.chewThresholdMult ?? 2.0; // < swallow's mult
+    this.chewWindowMs = opts.chewWindowMs ?? 4000; // trailing window for bumps
+    this.minChewBumps = opts.minChewBumps ?? 4; // bumps needed to call it chewing
+    this.chewHoldMs = opts.chewHoldMs ?? 1500; // keep "chewing" this long after
+    this.chewContextMs = opts.chewContextMs ?? 2500; // swallow within = food
+
+    this.chewBumpTimes = []; // recent bump onset times (ms)
+    this.aboveChew = false; // hysteresis edge tracking for bump onsets
+    this.chewing = false;
+    this.lastChewActiveTime = -Infinity; // last time chewing was active
+
     // --- Optional raw-capture for the record/replay tuning loop ---
     this.recording = false;
     this.recordChunks = []; // array of Float32Array frames while recording
@@ -130,6 +147,8 @@ class SwallowProcessor extends AudioWorkletProcessor {
       'emaAlpha',
       'adaptRate',
       'minSnr',
+      'chewThresholdMult',
+      'minChewBumps',
     ];
     for (const k of tunable) {
       if (typeof p[k] === 'number' && Number.isFinite(p[k])) this[k] = p[k];
@@ -145,6 +164,10 @@ class SwallowProcessor extends AudioWorkletProcessor {
     this.releaseThreshold = Infinity;
     this.state = STATE.SILENT;
     this.smoothed = 0;
+    this.chewBumpTimes = [];
+    this.aboveChew = false;
+    this.chewing = false;
+    this.lastChewActiveTime = -Infinity;
   }
 
   _applyThreshold() {
@@ -201,6 +224,9 @@ class SwallowProcessor extends AudioWorkletProcessor {
       this.baseline = Math.max(this.baseline, this.minBaseline);
       this._applyThreshold();
     }
+
+    // Chewing detection runs in parallel on the raw (un-smoothed) stream.
+    this._detectChew(rawRms, now);
 
     // Stream both raw and smoothed levels out for visualization / debugging.
     this.port.postMessage({
@@ -277,10 +303,51 @@ class SwallowProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /**
+   * Update chewing state from the raw RMS stream. Counts energy bumps (rising
+   * crossings of the chew threshold) within a trailing window; a sustained
+   * rhythmic train of them = chewing. Runs in parallel with swallow detection.
+   */
+  _detectChew(rawRms, now) {
+    const chewThreshold = this.baseline * this.chewThresholdMult;
+
+    // Rising-edge bump detection with hysteresis (release at 0.7×).
+    if (!this.aboveChew && rawRms > chewThreshold) {
+      this.aboveChew = true;
+      this.chewBumpTimes.push(now);
+    } else if (this.aboveChew && rawRms < chewThreshold * 0.7) {
+      this.aboveChew = false;
+    }
+
+    // Drop bumps older than the trailing window.
+    const cutoff = now - this.chewWindowMs;
+    while (this.chewBumpTimes.length && this.chewBumpTimes[0] < cutoff) {
+      this.chewBumpTimes.shift();
+    }
+
+    const rhythmic = this.chewBumpTimes.length >= this.minChewBumps;
+    let chewing;
+    if (rhythmic) {
+      this.lastChewActiveTime = now;
+      chewing = true;
+    } else {
+      // Hold the chewing state briefly so a between-cycle gap doesn't flicker.
+      chewing = now - this.lastChewActiveTime < this.chewHoldMs;
+    }
+
+    if (chewing !== this.chewing) {
+      this.chewing = chewing;
+      this.port.postMessage({ type: 'chewing', active: chewing, t: now });
+    }
+  }
+
   _evaluateEvent(offsetTime) {
     const duration = offsetTime - this.onsetTime;
     const sinceLast = offsetTime - this.lastEventTime;
     const snr = this.peakRms / this.baseline;
+    // Food context: was the user chewing just before this swallow?
+    const chewRecent =
+      this.chewing || offsetTime - this.lastChewActiveTime <= this.chewContextMs;
 
     const durationOk = duration >= this.minDuration && duration <= this.maxDuration;
     const intervalOk = sinceLast >= this.minInterval;
@@ -295,6 +362,9 @@ class SwallowProcessor extends AudioWorkletProcessor {
         peak: this.peakRms,
         baseline: this.baseline,
         snr,
+        chewRecent,
+        // Heuristic label: chewing before → food; otherwise water/saliva.
+        kind: chewRecent ? 'food' : 'liquid',
       });
     } else {
       // Surface rejected candidates — useful while tuning thresholds.
