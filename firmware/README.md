@@ -23,10 +23,26 @@ the 2.5 kHz top of the swallow band.
 
 ## Hardware
 
-- **Seeed Studio XIAO nRF52840 _Sense_** (the "Sense" variant has the PDM mic + IMU)
+- **Seeed Studio XIAO nRF52840 _Sense_** — the **Sense** variant is required (it
+  has the PDM mic + IMU; the plain XIAO nRF52840 has neither). On DigiKey,
+  Mouser, or seeedstudio.com.
 - LiPo battery (100–250 mAh) on the board's battery pads, or just USB power for bench tests
 - Optional: a piezo **contact mic** pressed to the throat for better SNR than the
   on-board air mic (would replace the PDM path — not wired in this v0)
+
+### Parts already on hand (prior DigiKey order — reusable here)
+
+| Part | Role | Notes |
+| --- | --- | --- |
+| LiPo 3.7V 2800 mAh (Jameco) | Bench power | ⚠️ Too large for a discreet pendant (that needs ~100–250 mAh) — bench/prototype only. Verify polarity against the XIAO `BAT+`/`BAT-` pads before connecting; reverse polarity can destroy the board. The XIAO charges single-cell LiPo over USB, so no external charger needed. |
+| JST PH 2-pin cable (Adafruit 261) | Battery → board | Confirm the cell's connector is JST PH 2.0 or rewire carefully. |
+| SEGGER J-Link EDU Mini | SWD flash/debug | Optional — the XIAO flashes over USB. Handy for stepping through firmware. |
+| Tag-Connect TC2030-CTX | SWD programming | Only for a **future custom PCB** that has a Tag-Connect footprint; not needed for the dev board. |
+| TPS61023 5V boost | — | Not needed; the XIAO runs directly off the 3.7V LiPo. |
+
+> Not reusable for Intero: the H2 / CH4 / MICS-5524 gas sensors and the SHT40
+> humidity/temp sensor are from a different (environmental) project and have no
+> role in swallow sensing.
 
 ## Toolchain
 
