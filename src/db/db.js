@@ -26,7 +26,6 @@ export async function saveSession(session) {
     baselineRate: session.baselineRate ?? null,
     paceCeiling: session.paceCeiling ?? null,
     baseline: session.baseline ?? null,
-    hrAvg: session.hrAvg ?? null,
   });
 }
 

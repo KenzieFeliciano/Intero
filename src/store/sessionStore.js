@@ -11,15 +11,14 @@
 import { create } from 'zustand';
 import { AudioEngine, EngineState } from '../audio/AudioEngine.js';
 import { overpaceFeedback, primeHaptics } from '../audio/haptics.js';
-import { HeartRateMonitor } from '../sensors/heartRate.js';
 import { saveSession, saveCheckIn } from '../db/db.js';
+import { loadParams, persistParams, encodeWav, replayDetection } from './tuning.js';
 
 const ROLLING_WINDOW_MS = 60_000; // swallows/min computed over the last 60 s
 const TICK_MS = 250; // UI refresh cadence
 
 let engine = null;
 let ticker = null;
-let hrMonitor = null;
 
 /** Rolling rate in swallows/minute. Normalizes by elapsed time early on so a
  *  single swallow at second 5 doesn't read as a wild extrapolation. */
@@ -98,18 +97,13 @@ export const useSessionStore = create((set, get) => ({
   paceCeiling: DEFAULT_PACE_CEILING, // absolute soft cap
   overpaceEvents: 0,
 
-  // --- detection tuning (forwarded live to the worklet) ---
-  detectionParams: { ...DEFAULT_DETECTION_PARAMS },
+  // --- detection tuning (forwarded live to the worklet; persisted) ---
+  detectionParams: loadParams(DEFAULT_DETECTION_PARAMS),
 
-  // --- optional heart-rate sensor (Web Bluetooth; unsupported on iOS) ---
-  hrSupported: HeartRateMonitor.supported,
-  hrConnected: false,
-  hrDeviceName: null,
-  hrError: null,
-  heartRate: null, // latest bpm
-  hrContact: null, // sensor-contact boolean, or null if unsupported
-  hrSum: 0, // for session-average bpm
-  hrCount: 0,
+  // --- recording / replay (debug tuning loop) ---
+  isRecording: false,
+  recording: null, // { samples: Float32Array, sampleRate } of the last capture
+  replayResult: null, // { swallows, rejected } from the last offline replay
 
   // --- post-meal flow ---
   showCheckIn: false,
@@ -125,44 +119,50 @@ export const useSessionStore = create((set, get) => ({
   setPaceCeiling: (n) => set({ paceCeiling: n }),
   setAccelTolerance: (n) => set({ accelTolerance: n }),
 
-  /** Live-update one or more detection parameters in the worklet. */
+  /** Live-update one or more detection parameters in the worklet and persist. */
   setDetectionParam: (key, value) => {
     const detectionParams = { ...get().detectionParams, [key]: value };
     set({ detectionParams });
     engine?.setParams({ [key]: value });
+    persistParams(detectionParams);
   },
 
-  /** Connect a BLE heart-rate sensor. Must run in a user gesture. */
-  connectHeartRate: async () => {
-    if (!HeartRateMonitor.supported || hrMonitor) return;
-    set({ hrError: null });
-    hrMonitor = new HeartRateMonitor({
-      onMeasurement: (m) =>
-        set((s) => ({
-          heartRate: m.bpm,
-          hrContact: m.contact,
-          hrSum: s.hrSum + m.bpm,
-          hrCount: s.hrCount + 1,
-        })),
-      onConnection: (connected, name) =>
-        set((s) => ({
-          hrConnected: connected,
-          hrDeviceName: connected ? name : s.hrDeviceName,
-          heartRate: connected ? s.heartRate : null,
-          hrContact: connected ? s.hrContact : null,
-        })),
-      onError: (err) => set({ hrError: err.message }),
-    });
-    const ok = await hrMonitor.connect();
-    if (!ok && !get().hrConnected) hrMonitor = null;
+  // --- recording & replay ----------------------------------------------
+  /** Start capturing the (filtered) audio the detector sees, for later replay.
+   *  Only meaningful while a session is running. */
+  startRecording: () => {
+    if (!engine || get().isRecording) return;
+    engine.startRecording();
+    set({ isRecording: true, replayResult: null });
   },
 
-  disconnectHeartRate: async () => {
-    if (hrMonitor) {
-      await hrMonitor.disconnect();
-      hrMonitor = null;
-    }
-    set({ hrConnected: false, heartRate: null, hrContact: null });
+  /** Stop capturing; the samples arrive via the engine's onRecording handler. */
+  stopRecording: () => {
+    if (!engine || !get().isRecording) return;
+    engine.stopRecording();
+    set({ isRecording: false });
+  },
+
+  /** Download the last recording as a 16-bit PCM WAV. */
+  downloadRecording: () => {
+    const rec = get().recording;
+    if (!rec) return;
+    const blob = encodeWav(rec.samples, rec.sampleRate);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `intero-session-${new Date().toISOString().slice(0, 19)}.wav`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  /** Re-run detection on the last recording with the CURRENT params — the
+   *  tuning loop: tweak sliders, replay, compare counts, no eating required. */
+  replayRecording: async () => {
+    const rec = get().recording;
+    if (!rec) return;
+    const result = await replayDetection(rec.samples, rec.sampleRate, get().detectionParams);
+    set({ replayResult: result });
   },
 
   /** Current personalized overpace target (swallows/min). */
@@ -206,8 +206,9 @@ export const useSessionStore = create((set, get) => ({
       calibration: null,
       showCheckIn: false,
       debugEvents: [],
-      hrSum: 0, // reset per-session HR average (keep any live connection)
-      hrCount: 0,
+      isRecording: false,
+      recording: null,
+      replayResult: null,
     });
 
     engine = new AudioEngine(
@@ -227,6 +228,8 @@ export const useSessionStore = create((set, get) => ({
           })),
         onSwallow: (msg) => get()._onSwallow(msg),
         onRejected: (msg) => get()._onRejected(msg),
+        onRecording: (msg) =>
+          set({ recording: { samples: msg.samples, sampleRate: msg.sampleRate } }),
       },
       {
         // processorOptions forwarded into the worklet
@@ -314,6 +317,12 @@ export const useSessionStore = create((set, get) => ({
       ticker = null;
     }
 
+    // Flush an in-progress recording before tearing down the context.
+    if (engine && get().isRecording) {
+      await engine.stopRecording();
+      set({ isRecording: false });
+    }
+
     const state = get();
     const endedAt = Date.now();
     const durationMs = state.startedAt ? endedAt - state.startedAt : 0;
@@ -330,7 +339,6 @@ export const useSessionStore = create((set, get) => ({
           baselineRate: state.baselineRate,
           paceCeiling: state.paceCeiling,
           baseline: state.calibration?.baseline ?? null,
-          hrAvg: state.hrCount > 0 ? Math.round(state.hrSum / state.hrCount) : null,
         });
       } catch (e) {
         console.error('[intero] failed to save session', e);

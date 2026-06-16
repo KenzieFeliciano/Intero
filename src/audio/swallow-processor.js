@@ -58,6 +58,10 @@ class SwallowProcessor extends AudioWorkletProcessor {
     // Smoothed RMS used by the detector.
     this.smoothed = 0;
 
+    // --- Optional raw-capture for the record/replay tuning loop ---
+    this.recording = false;
+    this.recordChunks = []; // array of Float32Array frames while recording
+
     // --- Windowing state ---
     this.windowSamples = Math.max(1, Math.round((sampleRate * this.windowMs) / 1000));
     this.windowAcc = 0; // sum of squares in the current window
@@ -90,8 +94,29 @@ class SwallowProcessor extends AudioWorkletProcessor {
         this._resetCalibration();
       } else if (msg.type === 'setParams' && msg.params) {
         this._setParams(msg.params);
+      } else if (msg.type === 'startRecording') {
+        this.recordChunks = [];
+        this.recording = true;
+      } else if (msg.type === 'stopRecording') {
+        this._flushRecording();
       }
     };
+  }
+
+  /** Concatenate captured frames and ship them to the main thread. */
+  _flushRecording() {
+    this.recording = false;
+    let total = 0;
+    for (const c of this.recordChunks) total += c.length;
+    const samples = new Float32Array(total);
+    let offset = 0;
+    for (const c of this.recordChunks) {
+      samples.set(c, offset);
+      offset += c.length;
+    }
+    this.recordChunks = [];
+    // Transfer the underlying buffer to avoid a copy.
+    this.port.postMessage({ type: 'recording', samples, sampleRate }, [samples.buffer]);
   }
 
   /** Live-update tunable parameters from the UI (no restart needed). */
@@ -284,6 +309,9 @@ class SwallowProcessor extends AudioWorkletProcessor {
 
     const channel = input[0];
     if (!channel) return true;
+
+    // Capture a copy of the (already band-pass-filtered) frame for replay.
+    if (this.recording) this.recordChunks.push(channel.slice());
 
     for (let i = 0; i < channel.length; i++) {
       const s = channel[i];

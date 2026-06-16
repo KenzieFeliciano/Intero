@@ -85,7 +85,18 @@ export default function DebugOverlay() {
     setDetectionParam,
     recalibrate,
     toggleDebug,
+    isRecording,
+    recording,
+    replayResult,
+    startRecording,
+    stopRecording,
+    downloadRecording,
+    replayRecording,
   } = useSessionStore();
+
+  const recSeconds = recording
+    ? Math.round(recording.samples.length / recording.sampleRate)
+    : 0;
 
   return (
     <div className="fixed bottom-24 left-3 right-3 z-10 mx-auto max-w-md rounded-xl border border-slate-700 bg-slate-900/95 p-3 text-xs font-mono shadow-xl backdrop-blur">
@@ -136,6 +147,43 @@ export default function DebugOverlay() {
             onChange={setDetectionParam}
           />
         ))}
+      </div>
+
+      {/* Record / replay tuning loop */}
+      <div className="mt-3 border-t border-slate-800 pt-2">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            className={`rounded px-2 py-1 text-[11px] ${
+              isRecording ? 'bg-pace-over text-slate-900' : 'bg-slate-700 text-slate-200'
+            }`}
+          >
+            {isRecording ? '■ Stop rec' : '● Record'}
+          </button>
+          <button
+            onClick={replayRecording}
+            disabled={!recording || isRecording}
+            className="rounded bg-slate-700 px-2 py-1 text-[11px] text-slate-200 disabled:opacity-40"
+          >
+            Replay
+          </button>
+          <button
+            onClick={downloadRecording}
+            disabled={!recording || isRecording}
+            className="rounded bg-slate-700 px-2 py-1 text-[11px] text-slate-200 disabled:opacity-40"
+          >
+            ⤓ WAV
+          </button>
+          <span className="ml-auto text-[10px] text-slate-500">
+            {isRecording ? 'recording…' : recording ? `${recSeconds}s clip` : 'no clip'}
+          </span>
+        </div>
+        {replayResult && (
+          <p className="mt-1 text-[11px] text-sky-300">
+            replay → {replayResult.swallows} swallows, {replayResult.rejected} rejected
+            <span className="text-slate-500"> (current params)</span>
+          </p>
+        )}
       </div>
 
       <div className="mt-2 max-h-32 overflow-y-auto">

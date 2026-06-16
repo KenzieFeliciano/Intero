@@ -166,6 +166,11 @@ export class AudioEngine {
       case 'rejected':
         this.handlers.onRejected?.(msg);
         break;
+      case 'recording':
+        this.handlers.onRecording?.(msg);
+        this._recordingResolve?.(msg);
+        this._recordingResolve = null;
+        break;
       case 'ready':
       default:
         break;
@@ -222,6 +227,20 @@ export class AudioEngine {
   /** Live-update detection parameters in the worklet (no restart). */
   setParams(params) {
     this.workletNode?.port.postMessage({ type: 'setParams', params });
+  }
+
+  /** Begin capturing the filtered audio the detector sees, for replay. */
+  startRecording() {
+    this.workletNode?.port.postMessage({ type: 'startRecording' });
+  }
+
+  /** Stop capturing; resolves with { samples, sampleRate } once it arrives. */
+  stopRecording() {
+    if (!this.workletNode) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      this._recordingResolve = resolve;
+      this.workletNode.port.postMessage({ type: 'stopRecording' });
+    });
   }
 
   _teardownStream() {
